@@ -1,0 +1,6 @@
+[submodule "submodules/realsense_utils2"]
+	path = submodules/realsense_utils2
+	url = git@github.com:giuschio/realsense-utils-public.git
+[submodule "submodules/apriltag_bundle_detector"]
+	path = submodules/apriltag_bundle_detector
+	url = git@github.com:giuschio/apriltag-bundle-detector-public.git

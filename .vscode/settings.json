@@ -1,0 +1,6 @@
+{
+  "python.analysis.extraPaths": [
+    "./submodules/apriltag_bundle_detector",
+    "./submodules/realsense_utils2",
+  ]
+}

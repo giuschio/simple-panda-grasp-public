@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=67.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-panda-grasp"
+version = "0.1.0"
+description = "Utilities for capturing scenes and calibration with a Panda robot."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Giulio" },
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "opencv-python",
+    "omegaconf",
+    "open3d",
+    "pillow",
+    "pyrealsense2",
+    "panda-python==0.8.1",
+    "readchar",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+segmentation = [
+    "transformers",
+]
+
+[tool.setuptools]
+packages = ["simple_panda_grasp", "simple_panda_grasp.utils"]
