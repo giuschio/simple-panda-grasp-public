@@ -44,15 +44,16 @@ The paper code is split into reusable repositories:
 
 - **[Simulation environment](https://github.com/giuschio/grasp-env-public):**
   scene generation, data collection, and simulated grasp evaluation.
-- **Grasp detection model:** model training and grasp inference (coming soon).
+- **[Grasp detection model](https://github.com/giuschio/graspcl-model-public):**
+  model training, grasp inference, recall, and continual adaptation.
 - **Robot control and deployment (this repository):** camera calibration,
   real-world perception, reachability checks, and grasp execution.
-- **Paper benchmark:** the top-level reproduction repository that combines the
-  components above and provides the paper experiments (coming soon).
+- **[Paper benchmark](https://github.com/giuschio/graspcl-benchmark-public):**
+  the top-level reproduction repository that combines the components above and
+  provides the paper experiments.
 
-For end-to-end reproduction, use the benchmark repository when it becomes
-available. This repository can also be used independently to run grasps on the
-supported hardware.
+For end-to-end reproduction, use the benchmark repository. This repository can
+also be used independently to run grasps on the supported hardware.
 
 If you use this package in your research, please cite:
 
