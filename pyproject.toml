@@ -18,6 +18,7 @@ dependencies = [
     "opencv-python",
     "omegaconf",
     "open3d",
+    "pycpd",
     "pillow",
     "pyrealsense2",
     "panda-python==0.8.1",

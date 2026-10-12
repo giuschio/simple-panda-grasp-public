@@ -175,6 +175,21 @@ T_world2panda: [qx, qy, qz, qw, tx, ty, tz]
 `T_world2panda` maps the workspace frame into the Panda base frame.
 Translations are expressed in metres and quaternions use `xyzw` order.
 
+### Fixed world-camera calibration
+
+To calibrate a fixed RGB-D camera directly against the Panda hand, place the
+hand close to the camera and run:
+
+```bash
+python scripts/calibrate_world_camera.py
+```
+
+The script registers the included hand model to one `camera_fdm` point cloud,
+shows the fit and both robot frames, and then asks for a second hand pose to
+validate the result. If accepted, it adds `T_camera2panda` (camera frame to
+Panda base frame) to `configs/config_panda.yaml`. The prompt's front/back choice
+disambiguates the hand's approximately symmetric geometry.
+
 ## Running the example
 
 The scene-clearing example captures the workspace, constructs a point cloud,
@@ -260,6 +275,7 @@ survive.
 | --- | --- |
 | `scripts/initialize_panda.py` | Enable control and test the Franka Hand. |
 | `scripts/calibrate_camera.py` | Calibrate the wrist camera and workspace. |
+| `scripts/calibrate_world_camera.py` | Calibrate a fixed world camera from the Panda hand. |
 | `scripts/move_panda.py` | Move to the start and default observation poses. |
 | `scripts/joint_recorder.py` | Interactively record Panda joint poses. |
 

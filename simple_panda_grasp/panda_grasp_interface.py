@@ -216,10 +216,9 @@ class PandaGraspInterface:
         return self.move_ee(T_ee2world, use_ik=use_ik)
     
     def get_ee2panda(self) -> Transform:
-        position = self.robot.get_position()
-        orientation = self.robot.get_orientation()
-        T_ee2panda = Transform(Rotation.from_quat(orientation), position)
-        return T_ee2panda
+        state = self.robot.get_robot().read_once()
+        matrix = np.asarray(state.O_T_EE).reshape(4, 4, order="F")
+        return Transform.from_matrix(matrix)
 
     def get_ee2world(self) -> Transform:
         T_ee2panda = self.get_ee2panda()
