@@ -15,10 +15,9 @@ authors = [
 dependencies = [
     "numpy",
     "scipy",
-    "opencv-python",
+    "opencv-python>=4.8,<5",
     "omegaconf",
     "open3d",
-    "pycpd",
     "pillow",
     "pyrealsense2",
     "panda-python==0.8.1",

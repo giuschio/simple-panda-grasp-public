@@ -7,7 +7,6 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import open3d as o3d
 from omegaconf import OmegaConf
-from pycpd import RigidRegistration
 
 from simple_panda_grasp.panda_grasp_interface import PandaGraspInterface
 from simple_panda_grasp.utils.transform import Rotation, Transform
@@ -17,11 +16,22 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs/config_panda.yaml"
 HAND_URDF = ROOT / "assets/robots/panda/hand.urdf"
 VOXEL_SIZE = 0.004
-HAND_DEPTH = 0.18
 MAX_DEPTH = 1.5
 FINGER_OPENING = 0.04
-# The standard Franka EE/TCP is 103.4 mm along +Z from the panda_hand URDF origin.
-T_HAND2EE = Transform(Rotation.identity(), [0.0, 0.0, -0.1034])
+N_CALIBRATION_POSES = 3
+N_BOUNDING_POINTS = 4
+BOUNDING_BOX_PADDING = np.array([0.035, 0.035, 0.050])
+MIN_HAND_POINTS = 200
+NORMAL_RADIUS = 4 * VOXEL_SIZE
+FPFH_RADIUS = 5 * VOXEL_SIZE
+GLOBAL_DISTANCE = 4 * VOXEL_SIZE
+COARSE_NORMAL_DISTANCE = 0.040
+FINE_NORMAL_DISTANCE = 0.015
+# panda_hand is fixed to the Franka flange with a -45 degree rotation about Z.
+# Using the flange makes calibration independent of the EE/TCP configured in Desk.
+T_HAND2FLANGE = Transform(
+    Rotation.from_euler("z", -np.pi / 4), np.zeros(3)
+)
 
 
 def pose(xyz="0 0 0", rpy="0 0 0") -> Transform:
@@ -63,12 +73,14 @@ def hand_cloud() -> o3d.geometry.PointCloud:
     model = meshes[0]
     for mesh in meshes[1:]:
         model += mesh
+    model.compute_vertex_normals()
     cloud = model.sample_points_uniformly(30000).voxel_down_sample(VOXEL_SIZE)
+    cloud.normalize_normals()
     cloud.paint_uniform_color([0.9, 0.15, 0.1])
     return cloud
 
 
-def capture_cloud(camera) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud]:
+def capture_cloud(camera) -> o3d.geometry.PointCloud:
     color, depth = camera.capture()
     depth = np.asarray(depth, dtype=float)
     color = np.asarray(color)[..., ::-1]
@@ -82,77 +94,129 @@ def capture_cloud(camera) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCl
     scene.points = o3d.utility.Vector3dVector(points[valid])
     scene.colors = o3d.utility.Vector3dVector(color[valid] / 255.0)
     scene = scene.voxel_down_sample(VOXEL_SIZE)
-
-    near = np.quantile(depth[valid], 0.05)
-    foreground = valid & (depth < near + HAND_DEPTH)
-    hand = o3d.geometry.PointCloud()
-    hand.points = o3d.utility.Vector3dVector(points[foreground])
-    hand = hand.voxel_down_sample(VOXEL_SIZE)
-    labels = np.asarray(hand.cluster_dbscan(0.012, 12, print_progress=False))
-    if labels.size and labels.max() >= 0:
-        counts = np.bincount(labels[labels >= 0])
-        hand = hand.select_by_index(np.flatnonzero(labels == counts.argmax()))
-    if len(hand.points) < 100:
-        raise RuntimeError("Could not isolate the hand; move it closer and keep it centered.")
-    return scene, hand
+    return scene
 
 
-def features(cloud: o3d.geometry.PointCloud):
-    cloud = deepcopy(cloud)
-    cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(0.02, 40))
-    feature = o3d.pipelines.registration.compute_fpfh_feature(
-        cloud, o3d.geometry.KDTreeSearchParamHybrid(0.05, 100)
-    )
-    return cloud, feature
+def pick_hand(scene: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
+    """Crop and clean the hand using four points selected in the scene cloud."""
+    while True:
+        print(
+            f"Select exactly {N_BOUNDING_POINTS} points around the hand with "
+            "Shift + left click. Use Shift + right click to undo, then press Q."
+        )
+        viewer = o3d.visualization.VisualizerWithEditing()
+        viewer.create_window(window_name="Select four hand bounding points")
+        viewer.add_geometry(scene)
+        viewer.get_render_option().point_size = 4.0
+        viewer.run()
+        viewer.destroy_window()
+        picked = viewer.get_picked_points()
+        if len(picked) != N_BOUNDING_POINTS:
+            print(
+                f"Selected {len(picked)} points; exactly "
+                f"{N_BOUNDING_POINTS} are required."
+            )
+            continue
 
+        picked_points = np.asarray(scene.points)[picked]
+        bounds = o3d.geometry.AxisAlignedBoundingBox(
+            picked_points.min(axis=0) - BOUNDING_BOX_PADDING,
+            picked_points.max(axis=0) + BOUNDING_BOX_PADDING,
+        )
+        hand = scene.crop(bounds)
+        if len(hand.points) < MIN_HAND_POINTS:
+            print(
+                f"The selected box contains only {len(hand.points)} points; "
+                "select points farther apart around the hand."
+            )
+            continue
 
-def choose_side(matrix: np.ndarray, side: str) -> np.ndarray:
-    camera_in_hand = np.linalg.inv(matrix)[:3, 3]
-    wanted_sign = 1.0 if side == "front" else -1.0
-    if np.sign(camera_in_hand[0]) != wanted_sign:
-        symmetry = np.eye(4)
-        symmetry[:3, :3] = Rotation.from_euler("z", np.pi).as_matrix()
-        matrix = matrix @ symmetry
-    return matrix
+        hand, _ = hand.remove_statistical_outlier(nb_neighbors=30, std_ratio=1.5)
+        hand, _ = hand.remove_radius_outlier(nb_points=8, radius=3 * VOXEL_SIZE)
+        if len(hand.points) < MIN_HAND_POINTS:
+            print(
+                f"Only {len(hand.points)} hand points remain after cleanup; "
+                "select a tighter box with less background."
+            )
+            continue
+        hand.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(
+                radius=NORMAL_RADIUS, max_nn=50
+            )
+        )
+        hand.orient_normals_towards_camera_location(np.zeros(3))
+        hand.normalize_normals()
+        print(f"Using {len(hand.points)} cleaned hand points for registration.")
+        return hand
 
 
 def register(model, observed) -> Transform:
-    while True:
-        side = input(
-            "Camera sees the hand's front (+X/palm side) or back (-X)? "
-            "[front/back]: "
-        ).strip().lower()
-        if side in ("front", "back"):
-            break
-
-    source, source_feature = features(model)
-    target, target_feature = features(observed)
-    result = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-        source, target, source_feature, target_feature, True, 3 * VOXEL_SIZE,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(False), 3,
-        [o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(3 * VOXEL_SIZE)],
-        o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999),
+    o3d.utility.random.seed(0)
+    source_features = o3d.pipelines.registration.compute_fpfh_feature(
+        model,
+        o3d.geometry.KDTreeSearchParamHybrid(radius=FPFH_RADIUS, max_nn=100),
     )
-    initial = choose_side(result.transformation, side)
-
-    rng = np.random.default_rng(0)
-    x = np.asarray(observed.points)
-    y = np.asarray(model.points)
-    x = x[rng.choice(len(x), min(1800, len(x)), replace=False)]
-    y = y[rng.choice(len(y), min(1800, len(y)), replace=False)]
-    y_initial = y @ initial[:3, :3].T + initial[:3, 3]
-    _, (_, rotation, translation) = RigidRegistration(
-        X=x, Y=y_initial, scale=False, max_iterations=60, tolerance=1e-5, w=0.1
-    ).register()
-    delta = np.eye(4)
-    delta[:3, :3] = rotation.T
-    delta[:3, 3] = translation
-    refined = o3d.pipelines.registration.registration_icp(
-        model, observed, 0.015, delta @ initial,
-        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+    target_features = o3d.pipelines.registration.compute_fpfh_feature(
+        observed,
+        o3d.geometry.KDTreeSearchParamHybrid(radius=FPFH_RADIUS, max_nn=100),
     )
-    print(f"Registration fitness: {refined.fitness:.3f}, RMSE: {refined.inlier_rmse * 1000:.1f} mm")
-    return Transform.from_matrix(refined.transformation)
+    global_result = (
+        o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+            model,
+            observed,
+            source_features,
+            target_features,
+            True,
+            GLOBAL_DISTANCE,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+            3,
+            [
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(
+                    GLOBAL_DISTANCE
+                ),
+                o3d.pipelines.registration.CorrespondenceCheckerBasedOnNormal(
+                    np.deg2rad(45)
+                ),
+            ],
+            o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.999),
+        )
+    )
+    print(
+        f"FPFH/RANSAC fitness: {global_result.fitness:.3f}, "
+        f"RMSE: {global_result.inlier_rmse * 1000:.1f} mm"
+    )
+
+    normal_source = deepcopy(model).transform(global_result.transformation)
+    normal_source.orient_normals_towards_camera_location(np.zeros(3))
+    coarse_symmetric = o3d.pipelines.registration.TransformationEstimationSymmetric(
+        o3d.pipelines.registration.HuberLoss(k=FINE_NORMAL_DISTANCE)
+    )
+    fine_symmetric = o3d.pipelines.registration.TransformationEstimationSymmetric(
+        o3d.pipelines.registration.TukeyLoss(k=FINE_NORMAL_DISTANCE)
+    )
+    coarse = o3d.pipelines.registration.registration_symmetric_icp(
+        normal_source,
+        observed,
+        COARSE_NORMAL_DISTANCE,
+        np.eye(4),
+        coarse_symmetric,
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60),
+    )
+    fine = o3d.pipelines.registration.registration_symmetric_icp(
+        normal_source,
+        observed,
+        FINE_NORMAL_DISTANCE,
+        coarse.transformation,
+        fine_symmetric,
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60),
+    )
+    normal_transform = fine.transformation @ global_result.transformation
+    print(
+        f"Normal-aware fitness: {fine.fitness:.3f}, "
+        f"RMSE: {fine.inlier_rmse * 1000:.1f} mm"
+    )
+    return Transform.from_matrix(normal_transform)
 
 
 def frame(transform: Transform, size: float):
@@ -161,35 +225,114 @@ def frame(transform: Transform, size: float):
     return axes
 
 
+def robot_poses(panda: PandaGraspInterface) -> tuple[Transform, Transform]:
+    """Return hand-to-base and configured-EE-to-base from one robot state."""
+    state = panda.robot.get_robot().read_once()
+    ee_to_base = Transform.from_matrix(
+        np.asarray(state.O_T_EE).reshape(4, 4, order="F")
+    )
+    ee_to_flange = Transform.from_matrix(
+        np.asarray(state.F_T_EE).reshape(4, 4, order="F")
+    )
+    flange_to_base = ee_to_base * ee_to_flange.inverse()
+    hand_to_base = flange_to_base * T_HAND2FLANGE
+    return hand_to_base, ee_to_base
+
+
+def mean_transform(transforms: list[Transform]) -> Transform:
+    rotations = Rotation.from_matrix(
+        np.stack([transform.rotation.as_matrix() for transform in transforms])
+    ).mean()
+    translations = np.mean(
+        [transform.translation for transform in transforms], axis=0
+    )
+    return Transform(rotations, translations)
+
+
+def pose_error(reference: Transform, estimate: Transform) -> tuple[float, float]:
+    translation = np.linalg.norm(reference.translation - estimate.translation)
+    rotation = reference.rotation * estimate.rotation.inv()
+    return float(translation), float(np.degrees(rotation.magnitude()))
+
+
 def main() -> None:
     panda = PandaGraspInterface(str(CONFIG))
     try:
-        panda.open_gripper()
-        print("Place the hand close to and centered in the fixed camera, then press Enter.")
-        input()
+        # panda.open_gripper()
         model = hand_cloud()
-        scene, observed = capture_cloud(panda.camera)
-        ee_to_base = panda.get_ee2panda()
-        hand_to_camera = register(model, observed)
-        hand_to_base = ee_to_base * T_HAND2EE
-        camera_to_base = hand_to_base * hand_to_camera.inverse()
-        registered = deepcopy(model).transform(hand_to_camera.as_matrix())
-        ee_to_camera = hand_to_camera * T_HAND2EE.inverse()
-        base_to_camera = camera_to_base.inverse()
-        o3d.visualization.draw_geometries([
-            scene, registered, frame(ee_to_camera, 0.07), frame(base_to_camera, 0.14)
-        ], window_name="Camera cloud + hand (EE frame small, base frame large)")
+        camera_to_base_estimates = []
+
+        while len(camera_to_base_estimates) < N_CALIBRATION_POSES:
+            index = len(camera_to_base_estimates) + 1
+            instruction = "Place" if index == 1 else "Move"
+            input(
+                f"{instruction} the hand at calibration pose "
+                f"{index}/{N_CALIBRATION_POSES}, close to and centered in the "
+                "fixed camera. Use a distinctly different orientation for each "
+                "pose, then press Enter: "
+            )
+            scene = capture_cloud(panda.camera)
+            hand_to_base, ee_to_base = robot_poses(panda)
+            observed = pick_hand(scene)
+            hand_to_camera = register(model, observed)
+            camera_to_base_estimate = hand_to_base * hand_to_camera.inverse()
+
+            registered = deepcopy(model).transform(hand_to_camera.as_matrix())
+            ee_to_camera = camera_to_base_estimate.inverse() * ee_to_base
+            o3d.visualization.draw_geometries([
+                scene,
+                registered,
+                frame(ee_to_camera, 0.07),
+                frame(camera_to_base_estimate.inverse(), 0.14),
+            ], window_name=(
+                f"Calibration pose {index}/{N_CALIBRATION_POSES} "
+                "(EE frame small, base frame large)"
+            ))
+
+            accepted = input(
+                "Does this registration look correct? [y/N]: "
+            ).strip().lower()
+            if accepted == "y":
+                camera_to_base_estimates.append(camera_to_base_estimate)
+            else:
+                print("Registration rejected; repeat this pose.")
+
+        camera_to_base = mean_transform(camera_to_base_estimates)
+        print("Calibration-pose disagreement from the combined estimate:")
+        for index, estimate in enumerate(camera_to_base_estimates, start=1):
+            translation_error, rotation_error = pose_error(camera_to_base, estimate)
+            print(
+                f"  Pose {index}: {translation_error * 1000:.1f} mm, "
+                f"{rotation_error:.2f} deg"
+            )
 
         input("Move the hand to a different pose, then press Enter to validate: ")
-        validation_scene, _ = capture_cloud(panda.camera)
-        ee_to_base = panda.get_ee2panda()
-        ee_to_camera = camera_to_base.inverse() * ee_to_base
-        predicted_hand_to_camera = ee_to_camera * T_HAND2EE
+        validation_scene = capture_cloud(panda.camera)
+        hand_to_base, ee_to_base = robot_poses(panda)
+        validation_observed = pick_hand(validation_scene)
+        predicted_hand_to_camera = camera_to_base.inverse() * hand_to_base
         predicted_hand = deepcopy(model).transform(predicted_hand_to_camera.as_matrix())
+
+        print("Registering the validation pose independently to measure its error.")
+        observed_hand_to_camera = register(model, validation_observed)
+        translation_error, rotation_error = pose_error(
+            observed_hand_to_camera, predicted_hand_to_camera
+        )
+        print(
+            f"Validation error: {translation_error * 1000:.1f} mm, "
+            f"{rotation_error:.2f} deg"
+        )
+        observed_hand = deepcopy(model)
+        observed_hand.paint_uniform_color([0.1, 0.8, 0.2])
+        observed_hand.transform(observed_hand_to_camera.as_matrix())
+        ee_to_camera = camera_to_base.inverse() * ee_to_base
         o3d.visualization.draw_geometries([
-            validation_scene, predicted_hand, frame(ee_to_camera, 0.07),
+            validation_scene, predicted_hand, observed_hand,
+            frame(ee_to_camera, 0.07),
             frame(camera_to_base.inverse(), 0.14),
-        ], window_name="Validation (EE frame small, base frame large)")
+        ], window_name=(
+            "Validation (prediction red, independent registration green)"
+        ))
 
         if input("Does the validation overlay look correct? [y/N]: ").strip().lower() == "y":
             config = OmegaConf.load(CONFIG)

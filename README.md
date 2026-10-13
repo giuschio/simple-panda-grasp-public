@@ -298,6 +298,7 @@ survive.
 | `scripts/initialize_panda.py` | Enable control and test the Franka Hand. |
 | `scripts/calibrate_camera.py` | Calibrate the wrist camera and workspace. |
 | `scripts/calibrate_world_camera.py` | Calibrate a fixed world camera from the Panda hand. |
+| `scripts/test_camera2base.py` | Display the configured Panda base and live EE frames in a fixed-camera cloud. |
 | `scripts/move_panda.py` | Move to the start and default observation poses. |
 | `scripts/joint_recorder.py` | Interactively record Panda joint poses. |
 
