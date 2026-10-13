@@ -1,0 +1,74 @@
+tag_family: tag36h11
+
+# Printed part dimensions:
+# - Regular hexagonal prism with 62 mm sides.
+# - 124 mm across opposite vertices and 107.387 mm across opposite faces.
+# - Six 58 x 58 mm tags form one band, leaving 2 mm at each side edge.
+# - The overall prism height is not part of the calibration geometry; z = 0 is
+#   the horizontal centerline of the tag band.
+#
+# Bundle origin: center of the six-tag band, with +Z along the prism axis.
+# Tag 0 is on the +X face; IDs increase counter-clockwise viewed from +Z.
+# All tags are upright: tag +Y points along prism +Z and tag +Z points outward.
+tag_bundles:
+  - name: calibration
+    layout:
+      - id: 0
+        size: 0.058
+        x: 0.053693575035
+        y: 0.0
+        z: 0.0
+        qx: 0.5
+        qy: 0.5
+        qz: 0.5
+        qw: 0.5
+
+      - id: 1
+        size: 0.058
+        x: 0.026846787517
+        y: 0.0465
+        z: 0.0
+        qx: 0.183012701892
+        qy: 0.683012701892
+        qz: 0.683012701892
+        qw: 0.183012701892
+
+      - id: 2
+        size: 0.058
+        x: -0.026846787517
+        y: 0.0465
+        z: 0.0
+        qx: -0.183012701892
+        qy: 0.683012701892
+        qz: 0.683012701892
+        qw: -0.183012701892
+
+      - id: 3
+        size: 0.058
+        x: -0.053693575035
+        y: 0.0
+        z: 0.0
+        qx: -0.5
+        qy: 0.5
+        qz: 0.5
+        qw: -0.5
+
+      - id: 4
+        size: 0.058
+        x: -0.026846787517
+        y: -0.0465
+        z: 0.0
+        qx: 0.683012701892
+        qy: -0.183012701892
+        qz: -0.183012701892
+        qw: 0.683012701892
+
+      - id: 5
+        size: 0.058
+        x: 0.026846787517
+        y: -0.0465
+        z: 0.0
+        qx: 0.683012701892
+        qy: 0.183012701892
+        qz: 0.183012701892
+        qw: 0.683012701892

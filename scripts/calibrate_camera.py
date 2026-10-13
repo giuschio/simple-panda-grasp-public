@@ -1,6 +1,6 @@
-# Print configs/workspace.pdf at actual size on A3 paper, place it flat on the table in front of the Panda, then run: python scripts/calibrate_camera.py
-"""Calibrate the wrist camera and workspace frame in one pass."""
+"""Calibrate either a wrist-mounted or fixed camera with AprilTag bundles."""
 
+import argparse
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import sleep
@@ -17,6 +17,7 @@ from simple_panda_grasp.utils.transform import Rotation, Transform
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_CONFIG = ROOT / "configs" / "config_panda.yaml"
 WORKSPACE_CONFIG = ROOT / "configs" / "config_workspace.yaml"
+CALIBRATION_BUNDLE_CONFIG = ROOT / "configs" / "config_calibration_bundle.yaml"
 
 PANDA_HOSTNAME = "172.16.0.2"
 CAMERA_TYPE = "camera_fdm"
@@ -24,14 +25,14 @@ TAG_ORIGIN_IN_WORLD = np.array([0.15, 0.15, 0.0])
 MIN_SAMPLES = 6
 
 
-def load_target() -> tuple[cv2.aruco.Dictionary, dict[int, np.ndarray]]:
-    config = OmegaConf.load(WORKSPACE_CONFIG)
+def load_target(path: Path, bundle_name: str):
+    config = OmegaConf.load(path)
     if config.tag_family != "tag36h11":
         raise ValueError(f"Unsupported AprilTag family: {config.tag_family}")
 
-    bundles = [bundle for bundle in config.tag_bundles if bundle.name == "workspace"]
+    bundles = [bundle for bundle in config.tag_bundles if bundle.name == bundle_name]
     if len(bundles) != 1:
-        raise ValueError("config_workspace.yaml must contain one 'workspace' bundle")
+        raise ValueError(f"{path.name} must contain one {bundle_name!r} bundle")
 
     marker_points = {}
     for tag in bundles[0].layout:
@@ -63,7 +64,7 @@ def detect_target(
     dictionary: cv2.aruco.Dictionary,
     marker_points: dict[int, np.ndarray],
 ) -> Transform | None:
-    """Return the workspace-target-to-camera transform."""
+    """Return the bundle-to-camera transform."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     detector = cv2.aruco.ArucoDetector(dictionary, cv2.aruco.DetectorParameters())
     corners, ids, _ = detector.detectMarkers(gray)
@@ -109,63 +110,94 @@ def mean_transform(transforms: list[Transform]) -> Transform:
     return Transform(rotations, translations)
 
 
-def calibrate(panda: PandaGraspInterface) -> tuple[Transform, Transform]:
-    gripper_to_base = []
-    target_to_camera = []
-    dictionary, marker_points = load_target()
+def capture_target(panda, dictionary, marker_points) -> Transform | None:
+    color, _ = panda.camera.capture()
+    return detect_target(
+        color, panda.camera.camera_matrix, dictionary, marker_points
+    )
 
+
+def collect_samples(panda: PandaGraspInterface, mode: str):
+    target_config, bundle_name = {
+        "eye-in-hand": (WORKSPACE_CONFIG, "workspace"),
+        "eye-on-base": (CALIBRATION_BUNDLE_CONFIG, "calibration"),
+    }[mode]
+    dictionary, marker_points = load_target(target_config, bundle_name)
+    ee_to_base = []
+    target_to_camera = []
+
+    if mode == "eye-on-base":
+        input("Rigidly attach the calibration prism, then press Enter: ")
+        print("Use varied poses and keep two adjacent tags visible when possible.")
     panda.move_to_start()
-    for index, joints in enumerate(WRIST_CALIBRATION_JOINTS, start=1):
-        print(f"[{index}/{len(WRIST_CALIBRATION_JOINTS)}] Capturing calibration pose")
+    poses = WRIST_CALIBRATION_JOINTS
+
+    for index, joints in enumerate(poses, start=1):
+        print(f"[{index}/{len(poses)}] Capturing calibration pose")
         if not panda.move_jj(joints):
             print("  Robot could not reach this pose; skipping it.")
             continue
-
         sleep(3.0)
-        color, _ = panda.camera.capture()
-        target_pose = detect_target(
-            color,
-            panda.camera.camera_matrix,
-            dictionary,
-            marker_points,
-        )
+
+        target_pose = capture_target(panda, dictionary, marker_points)
         if target_pose is None:
-            print("  Workspace target not visible; skipping this pose.")
+            print("  Calibration target not visible; skipping this pose.")
             continue
 
-        gripper_to_base.append(panda.get_ee2panda())
+        ee_to_base.append(panda.get_ee2panda())
         target_to_camera.append(target_pose)
 
-    if len(gripper_to_base) < MIN_SAMPLES:
+    if len(ee_to_base) < MIN_SAMPLES:
         raise RuntimeError(
-            f"Only {len(gripper_to_base)} usable poses were captured; "
+            f"Only {len(ee_to_base)} usable poses were captured; "
             f"at least {MIN_SAMPLES} are required. Check the target placement."
         )
+    return ee_to_base, target_to_camera
 
-    camera_rotation, camera_translation = cv2.calibrateHandEye(
-        [pose.rotation.as_matrix() for pose in gripper_to_base],
-        [pose.translation for pose in gripper_to_base],
-        [pose.rotation.as_matrix() for pose in target_to_camera],
-        [pose.translation for pose in target_to_camera],
+
+def hand_eye(robot_poses: list[Transform], target_poses: list[Transform]) -> Transform:
+    rotation, translation = cv2.calibrateHandEye(
+        [pose.rotation.as_matrix() for pose in robot_poses],
+        [pose.translation for pose in robot_poses],
+        [pose.rotation.as_matrix() for pose in target_poses],
+        [pose.translation for pose in target_poses],
         method=cv2.CALIB_HAND_EYE_DANIILIDIS,
     )
-    camera_to_ee = Transform(
-        Rotation.from_matrix(camera_rotation),
-        np.asarray(camera_translation).reshape(3),
+    result = Transform(
+        Rotation.from_matrix(rotation), np.asarray(translation).reshape(3)
     )
-    if not np.isfinite(camera_to_ee.to_list()).all():
+    if not np.isfinite(result.to_list()).all():
         raise RuntimeError("OpenCV could not find a valid hand-eye calibration.")
+    return result
+
+
+def calibrate_eye_in_hand(panda: PandaGraspInterface):
+    ee_to_base, target_to_camera = collect_samples(panda, "eye-in-hand")
+    camera_to_ee = hand_eye(ee_to_base, target_to_camera)
 
     target_to_panda = mean_transform([
         ee_to_panda * camera_to_ee * target_to_cam
-        for ee_to_panda, target_to_cam in zip(gripper_to_base, target_to_camera)
+        for ee_to_panda, target_to_cam in zip(ee_to_base, target_to_camera)
     ])
     target_to_world = Transform(Rotation.identity(), TAG_ORIGIN_IN_WORLD)
     world_to_panda = target_to_panda * target_to_world.inverse()
     return camera_to_ee, world_to_panda
 
 
+def calibrate_eye_on_base(panda: PandaGraspInterface) -> Transform:
+    ee_to_base, target_to_camera = collect_samples(panda, "eye-on-base")
+    # Inverting the robot poses maps OpenCV's hand-eye result to camera -> base.
+    base_to_ee = [pose.inverse() for pose in ee_to_base]
+    return hand_eye(base_to_ee, target_to_camera)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "mode", nargs="?", choices=("eye-in-hand", "eye-on-base"),
+        default="eye-in-hand",
+    )
+    mode = parser.parse_args().mode
     bootstrap_config = OmegaConf.create({
         "hostname": PANDA_HOSTNAME,
         "camera_type": CAMERA_TYPE,
@@ -175,18 +207,27 @@ def main() -> None:
         panda = PandaGraspInterface(temporary_config.name)
 
     try:
-        camera_to_ee, world_to_panda = calibrate(panda)
+        if mode == "eye-in-hand":
+            camera_to_ee, world_to_panda = calibrate_eye_in_hand(panda)
+        else:
+            camera_to_panda = calibrate_eye_on_base(panda)
     finally:
         panda.camera.finalize()
 
-    config = OmegaConf.create({
-        "hostname": PANDA_HOSTNAME,
-        "camera_type": CAMERA_TYPE,
-        "T_camera2ee": camera_to_ee.to_list(),
-        "T_world2panda": world_to_panda.to_list(),
-    })
+    config = (
+        OmegaConf.load(OUTPUT_CONFIG)
+        if OUTPUT_CONFIG.exists()
+        else OmegaConf.create()
+    )
+    config.hostname = PANDA_HOSTNAME
+    config.camera_type = CAMERA_TYPE
+    if mode == "eye-in-hand":
+        config.T_camera2ee = camera_to_ee.to_list()
+        config.T_world2panda = world_to_panda.to_list()
+    else:
+        config.T_camera2panda = camera_to_panda.to_list()
     OmegaConf.save(config, OUTPUT_CONFIG)
-    print(f"Calibration complete. Wrote {OUTPUT_CONFIG}")
+    print(f"{mode} calibration complete. Wrote {OUTPUT_CONFIG}")
 
 
 if __name__ == "__main__":

@@ -130,9 +130,14 @@ The defaults assume the robot is at `172.16.0.2`. The initialization script
 also contains default Franka Desk credentials; override its command-line
 arguments if your setup differs.
 
-## Camera and workspace calibration
+## Camera calibration
 
-Calibration estimates both the wrist-camera pose and the table workspace pose.
+The same script supports a camera on the wrist and a fixed camera beside the
+robot.
+
+### Eye in hand
+
+This mode estimates both the wrist-camera pose and the table workspace pose.
 
 1. Print [`configs/workspace.pdf`](configs/workspace.pdf) at **actual size on A3
    paper**. Do not scale it to fit the page.
@@ -149,6 +154,21 @@ The script reads the AprilTag geometry from
 hand-eye calibration. On success it writes the complete machine configuration
 to `configs/config_panda.yaml`.
 
+### Eye on base
+
+Rigidly attach the hexagonal calibration prism to the hand. Its exact pose in
+the hand does not need to be known, but it must not move during calibration.
+Then run:
+
+```bash
+python scripts/calibrate_camera.py eye-on-base
+```
+
+The script moves through `WRIST_CALIBRATION_JOINTS`, using
+`configs/config_calibration_bundle.yaml` to detect the prism. Arrange the fixed
+camera so that preferably two adjacent tags remain visible across at least six
+poses. The result is written to `T_camera2panda` in `configs/config_panda.yaml`.
+
 The robot IP and camera backend are intentionally defined at the top of
 `scripts/calibrate_camera.py`:
 
@@ -162,20 +182,22 @@ FoundationStereo depth.
 
 ### Generated configuration
 
-The calibration output has four fields:
+Depending on the modes run, the configuration contains:
 
 ```yaml
 hostname: 172.16.0.2
 camera_type: camera_fdm
 T_camera2ee: [qx, qy, qz, qw, tx, ty, tz]
 T_world2panda: [qx, qy, qz, qw, tx, ty, tz]
+T_camera2panda: [qx, qy, qz, qw, tx, ty, tz]
 ```
 
 `T_camera2ee` maps the camera frame into the end-effector frame, and
 `T_world2panda` maps the workspace frame into the Panda base frame.
+`T_camera2panda` maps a fixed camera frame into the Panda base frame.
 Translations are expressed in metres and quaternions use `xyzw` order.
 
-### Fixed world-camera calibration
+### Registration-based fixed-camera calibration
 
 To calibrate a fixed RGB-D camera directly against the Panda hand, place the
 hand close to the camera and run:
@@ -184,10 +206,10 @@ hand close to the camera and run:
 python scripts/calibrate_world_camera.py
 ```
 
-The script registers the included hand model to one `camera_fdm` point cloud,
-shows the fit and both robot frames, and then asks for a second hand pose to
-validate the result. If accepted, it adds `T_camera2panda` (camera frame to
-Panda base frame) to `configs/config_panda.yaml`. The prompt's front/back choice
+This alternative script registers the included hand model to one `camera_fdm`
+point cloud, shows the fit and both robot frames, and then asks for a second
+hand pose to validate the result. If accepted, it adds `T_camera2panda`
+(camera frame to Panda base frame) to `configs/config_panda.yaml`. The prompt's front/back choice
 disambiguates the hand's approximately symmetric geometry.
 
 ## Running the example
