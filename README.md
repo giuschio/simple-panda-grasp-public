@@ -79,6 +79,12 @@ Clone the submodules:
 git submodule update --init --recursive
 ```
 
+Install the AprilTag bundle detector used by camera calibration:
+
+```bash
+python -m pip install -e submodules/apriltag_bundle_detector
+```
+
 Install the RealSense camera integration for the depth backend you want to use.
 
 For the camera's aligned raw depth:
@@ -145,9 +151,9 @@ python scripts/calibrate_camera.py
 ```
 
 The script reads the AprilTag geometry from
-`configs/config_workspace.yaml`, detects the target with OpenCV, and performs
-hand-eye calibration. On success it writes the complete machine configuration
-to `configs/config_panda.yaml`.
+`configs/config_workspace.yaml` with `apriltag_bundle_detector` and performs
+hand-eye calibration. On success it updates the camera and workspace transforms
+in `configs/config_panda.yaml` without replacing other configuration fields.
 
 The robot IP and camera backend are intentionally defined at the top of
 `scripts/calibrate_camera.py`:
